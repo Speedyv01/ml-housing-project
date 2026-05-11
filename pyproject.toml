@@ -12,6 +12,7 @@ dependencies = [
     "pandas",
     "scikit-learn",
     "joblib",
+    "numpy",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +22,11 @@ dev = [
     "ruff",
     "ipykernel",
     "httpx",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "boto3",
+    "python-dotenv",
 ]
 
 [tool.setuptools.packages.find]
