@@ -4,6 +4,8 @@ import time
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
+from dotenv import load_dotenv
 
 logging.basicConfig(
     level=logging.INFO,
@@ -11,7 +13,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-MODEL_LOCAL_PATH = Path("artifacts/models/model_latest.joblib")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+MODEL_UPLOADS = {
+    "model_latest.joblib": os.getenv("MODEL_OBJECT_NAME", "model_latest.joblib"),
+    "model_v1.joblib": os.getenv("MODEL_A_OBJECT_NAME", "model_v1.joblib"),
+    "model_v2.joblib": os.getenv("MODEL_B_OBJECT_NAME", "model_v2.joblib"),
+}
+MODELS_DIR = PROJECT_ROOT / "artifacts" / "models"
 
 
 def get_s3_client():
@@ -23,6 +32,7 @@ def get_s3_client():
         endpoint_url=endpoint,
         aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "admin"),
         aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "password123"),
+        config=Config(connect_timeout=3, read_timeout=5),
     )
 
 
@@ -37,7 +47,7 @@ def wait_for_minio(s3, max_retries=10, delay=2):
         try:
             s3.list_buckets()
             logger.info("MinIO est joignable.")
-            return
+            return True
         except Exception as exc:
             logger.warning(
                 "MinIO indisponible, tentative %s/%s : %s",
@@ -48,7 +58,7 @@ def wait_for_minio(s3, max_retries=10, delay=2):
             time.sleep(delay)
 
     logger.error("MinIO est indisponible apres toutes les tentatives.")
-    raise RuntimeError("MinIO n'est pas disponible.")
+    return False
 
 
 def ensure_bucket_exists(s3, bucket_name):
@@ -65,35 +75,45 @@ def ensure_bucket_exists(s3, bucket_name):
 
 
 def main():
-    """Publie le modele latest local dans le bucket MinIO de reference."""
+    """Publie les artefacts de modele requis dans le bucket MinIO de reference."""
     bucket_name = os.getenv("MINIO_BUCKET_MODELS", "ml-models")
-    object_name = os.getenv("MODEL_OBJECT_NAME", "model_latest.joblib")
-    logger.info(
-        "Preparation de l'upload. local_path=%s bucket=%s object=%s",
-        MODEL_LOCAL_PATH,
-        bucket_name,
-        object_name,
-    )
+    uploads = {
+        MODELS_DIR / local_filename: object_name
+        for local_filename, object_name in MODEL_UPLOADS.items()
+    }
+    logger.info("Preparation de l'upload des modeles vers le bucket '%s'.", bucket_name)
 
-    if not MODEL_LOCAL_PATH.exists():
-        logger.error(
-            "Le modele local a uploader est introuvable : %s",
-            MODEL_LOCAL_PATH,
-        )
+    missing_files = [
+        str(local_path) for local_path in uploads if not local_path.exists()
+    ]
+    if missing_files:
+        logger.error("Artefacts locaux introuvables : %s", missing_files)
         raise FileNotFoundError(
-            f"Modele introuvable : {MODEL_LOCAL_PATH}. "
-            "Verifier que l'entrainement a bien genere model_latest.joblib."
+            "Certains modeles sont introuvables. Verifier que l'entrainement A/B a "
+            f"bien genere : {', '.join(missing_files)}"
         )
 
     s3 = get_s3_client()
-    wait_for_minio(s3)
+    if not wait_for_minio(s3):
+        logger.warning(
+            "MinIO est indisponible. L'upload est annulé, mais le script se "
+            "termine sans erreur."
+        )
+        return
+
     ensure_bucket_exists(s3, bucket_name)
 
-    logger.info("Demarrage de l'upload vers MinIO.")
-    s3.upload_file(str(MODEL_LOCAL_PATH), bucket_name, object_name)
-    logger.info("Upload termine avec succes.")
+    for local_path, object_name in uploads.items():
+        logger.info(
+            "Demarrage de l'upload vers MinIO. local_path=%s object=%s",
+            local_path,
+            object_name,
+        )
+        s3.upload_file(str(local_path), bucket_name, object_name)
+        logger.info("Upload termine avec succes pour : %s", object_name)
 
-    print(f"Modele uploade : {MODEL_LOCAL_PATH} -> s3://{bucket_name}/{object_name}")
+    uploaded_objects = ", ".join(MODEL_UPLOADS.values())
+    print(f"Modeles uploades vers s3://{bucket_name}/ : {uploaded_objects}")
 
 
 if __name__ == "__main__":
